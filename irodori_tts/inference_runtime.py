@@ -616,7 +616,7 @@ class InferenceRuntime:
         self.default_text_max_len = default_text_max_len
         self.default_caption_max_len = default_caption_max_len
         self.default_max_ref_seconds = float(default_max_ref_seconds)
-        self.watermarker = SilentCipherWatermarker(device=str(self.codec_device))
+        self.watermarker = None
         self._infer_lock = threading.Lock()
         self._model_dtype = next(self.model.parameters()).dtype
         self._lora_adapter_names: dict[str, str] = {}
@@ -1054,7 +1054,7 @@ class InferenceRuntime:
                 self.key.model_precision,
                 self.key.codec_device,
                 self.key.codec_precision,
-                self.watermarker.ready,
+                (self.watermarker.ready if self.watermarker is not None else False),
                 req.cfg_guidance_mode,
                 req.seconds,
                 req.num_steps,
@@ -1242,6 +1242,7 @@ class InferenceRuntime:
             _log(f"[runtime] prepare_reference: {stage_sec * 1000.0:.1f} ms")
 
             hop_length = int(self.codec.model.hop_length)
+            encoded_conditions = None
             if manual_seconds is not None:
                 clamped_seconds = min(max_seconds, max(min_seconds, manual_seconds))
                 if clamped_seconds != manual_seconds:
@@ -1271,14 +1272,7 @@ class InferenceRuntime:
                     max_text_len=text_max_len,
                     has_speaker=has_speaker_duration,
                 ).to(self.model_device)
-                (
-                    duration_text_state,
-                    duration_text_mask,
-                    duration_speaker_state,
-                    _duration_speaker_mask,
-                    _duration_caption_state,
-                    _duration_caption_mask,
-                ) = self.model.encode_conditions(
+                encoded_conditions = self.model.encode_conditions(
                     text_input_ids=text_ids,
                     text_mask=text_mask,
                     ref_latent=ref_latent,
@@ -1288,7 +1282,16 @@ class InferenceRuntime:
                     speaker_state_override=speaker_state_override,
                     speaker_mask_override=speaker_mask_override,
                     speaker_uncond_mode=req.speaker_uncond_mode,
+                    skip_caption_encoding=not has_caption_text,
                 )
+                (
+                    duration_text_state,
+                    duration_text_mask,
+                    duration_speaker_state,
+                    _duration_speaker_mask,
+                    _duration_caption_state,
+                    _duration_caption_mask,
+                ) = encoded_conditions
                 pred_log_frames = self.model.predict_duration_log_frames(
                     text_state=duration_text_state,
                     text_mask=duration_text_mask,
@@ -1373,6 +1376,8 @@ class InferenceRuntime:
                 speaker_kv_min_t=speaker_kv_min_t,
                 t_schedule_mode=str(req.t_schedule_mode),
                 sway_coeff=float(req.sway_coeff),
+                encoded_conditions=encoded_conditions,
+                skip_caption_encoding=not has_caption_text,
             )
             stage_sec = _measure_end(self.model_device, t0)
             stage_timings.append(("sample_rf", stage_sec))
@@ -1430,7 +1435,7 @@ class InferenceRuntime:
             stage_timings.append(("decode_latent", stage_sec))
             _log(f"[runtime] decode_latent ({decode_mode}): {stage_sec * 1000.0:.1f} ms")
 
-            if self.watermarker.ready:
+            if self.watermarker is not None and self.watermarker.ready:
                 t0 = _measure_start(self.codec_device)
                 trimmed_audios = self.watermarker.encode_batch(
                     trimmed_audios,

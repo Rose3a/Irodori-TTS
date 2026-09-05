@@ -1731,6 +1731,7 @@ class TextToLatentRFDiT(nn.Module):
         text_condition_dropout: torch.Tensor | None = None,
         speaker_condition_dropout: torch.Tensor | None = None,
         caption_condition_dropout: torch.Tensor | None = None,
+        skip_caption_encoding: bool = False,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -1817,7 +1818,13 @@ class TextToLatentRFDiT(nn.Module):
             )
         caption_state = None
         if self.cfg.use_caption_condition:
-            if self.pretrained_text_backbone is None:
+            if bool(skip_caption_encoding) and not self.training:
+                caption_state = torch.zeros(
+                    (*caption_input_ids.shape, self.cfg.caption_dim_resolved),
+                    device=text_state.device,
+                    dtype=text_state.dtype,
+                )
+            elif self.pretrained_text_backbone is None:
                 caption_state = self.caption_encoder(caption_input_ids, caption_mask)
             else:
                 caption_state = self.caption_encoder(
